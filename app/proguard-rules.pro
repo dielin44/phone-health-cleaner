@@ -1,1 +1,1 @@
-# No shrinking rules are required for this small, framework-only application.
+# Framework-only application; no custom shrinking rules required.
