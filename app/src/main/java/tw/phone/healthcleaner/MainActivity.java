@@ -10,6 +10,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.view.View;
 import android.widget.Button;
+import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
@@ -30,6 +31,7 @@ public class MainActivity extends Activity {
     private final ExecutorService detector = Executors.newSingleThreadExecutor();
     private final Handler main = new Handler(Looper.getMainLooper());
     private final List<HistoryPoint> history = new ArrayList<>();
+    private final List<TemperatureRecord> recentTemperatures = new ArrayList<>();
 
     private DeviceMonitor deviceMonitor;
     private ScheduledExecutorService liveExecutor;
@@ -40,6 +42,7 @@ public class MainActivity extends Activity {
 
     private TextView status;
     private TextView batteryTempValue, cpuTempValue, gpuTempValue;
+    private TextView batteryTempArrow, cpuTempArrow, gpuTempArrow;
     private TextView downloadValue, uploadValue;
     private TextView deviceDetails, cpuDetails, batteryDetails, memoryDetails, networkDetails;
     private TextView historyTitle, historySummary;
@@ -74,18 +77,30 @@ public class MainActivity extends Activity {
 
         root.addView(sectionTitle("溫度"));
         LinearLayout temperatures = horizontal();
-        batteryTempValue = metricCard(temperatures, "電池", "— °C", Color.rgb(234, 88, 12));
-        cpuTempValue = metricCard(temperatures, "CPU", "— °C", Color.rgb(220, 38, 38));
-        gpuTempValue = metricCard(temperatures, "GPU", "— °C", Color.rgb(147, 51, 234));
+        batteryTempValue = metricCard(temperatures, "電池", "— °C", Color.rgb(234, 88, 12), true);
+        cpuTempValue = metricCard(temperatures, "CPU", "— °C", Color.rgb(220, 38, 38), true);
+        gpuTempValue = metricCard(temperatures, "GPU", "— °C", Color.rgb(147, 51, 234), true);
+        batteryTempArrow = (TextView) batteryTempValue.getTag();
+        cpuTempArrow = (TextView) cpuTempValue.getTag();
+        gpuTempArrow = (TextView) gpuTempValue.getTag();
         root.addView(temperatures);
 
         root.addView(sectionTitle("網路"));
         LinearLayout network = horizontal();
-        downloadValue = metricCard(network, "下載", "— KB/s", Color.rgb(37, 99, 235));
-        uploadValue = metricCard(network, "上傳", "— KB/s", Color.rgb(5, 150, 105));
+        downloadValue = metricCard(network, "下載", "— KB/s", Color.rgb(37, 99, 235), false);
+        uploadValue = metricCard(network, "上傳", "— KB/s", Color.rgb(5, 150, 105), false);
         root.addView(network);
         networkDetails = detailText("連線資訊尚未檢測");
         root.addView(card(networkDetails));
+
+        LinearLayout actions = horizontal();
+        detectButton = actionButton("開始檢測", Color.rgb(37, 99, 235));
+        monitorButton = actionButton("即時監測", Color.rgb(5, 150, 105));
+        actions.addView(detectButton, weightedButtonParams(true));
+        actions.addView(monitorButton, weightedButtonParams(false));
+        root.addView(actions);
+        detectButton.setOnClickListener(v -> runOneTimeDetection());
+        monitorButton.setOnClickListener(v -> toggleMonitoring());
 
         root.addView(sectionTitle("處理器核心"));
         cpuDetails = detailText("CPU 核心與頻率尚未檢測");
@@ -111,15 +126,6 @@ public class MainActivity extends Activity {
         root.addView(chartCard(temperatureChart));
         batteryChart = new TrendChartView(this, TrendChartView.BATTERY);
         root.addView(chartCard(batteryChart));
-
-        LinearLayout actions = horizontal();
-        detectButton = actionButton("開始檢測", Color.rgb(37, 99, 235));
-        monitorButton = actionButton("即時監測", Color.rgb(5, 150, 105));
-        actions.addView(detectButton, weightedButtonParams(true));
-        actions.addView(monitorButton, weightedButtonParams(false));
-        root.addView(actions);
-        detectButton.setOnClickListener(v -> runOneTimeDetection());
-        monitorButton.setOnClickListener(v -> toggleMonitoring());
 
         Button exit = actionButton("結束", Color.rgb(220, 38, 38));
         LinearLayout.LayoutParams exitParams = new LinearLayout.LayoutParams(-1, dp(56));
@@ -159,6 +165,7 @@ public class MainActivity extends Activity {
     private void startMonitoring() {
         monitoring = true;
         history.clear();
+        recentTemperatures.clear();
         monitoringStartedAt = System.currentTimeMillis();
         lastHistoryPointAt = 0;
         detectButton.setEnabled(false);
@@ -207,6 +214,7 @@ public class MainActivity extends Activity {
     }
 
     private void renderSnapshot(DeviceSnapshot s) {
+        updateTemperatureArrows(s);
         batteryTempValue.setText(temp(s.batteryTemp));
         cpuTempValue.setText(temp(s.cpuTemp));
         gpuTempValue.setText(temp(s.gpuTemp));
@@ -256,6 +264,45 @@ public class MainActivity extends Activity {
                 "\nGPU：" + s.gpu +
                 "\n螢幕：" + s.screen +
                 "\n記憶體：" + bytes(s.totalRam) + "｜儲存：" + bytes(s.totalStorage));
+    }
+
+    private void updateTemperatureArrows(DeviceSnapshot s) {
+        long cutoff = s.timestamp - 60_000;
+        while (!recentTemperatures.isEmpty() && recentTemperatures.get(0).timestamp < cutoff)
+            recentTemperatures.remove(0);
+        while (recentTemperatures.size() > 5) recentTemperatures.remove(0);
+
+        setTemperatureArrow(batteryTempArrow, s.batteryTemp, averageTemperature(0));
+        setTemperatureArrow(cpuTempArrow, s.cpuTemp, averageTemperature(1));
+        setTemperatureArrow(gpuTempArrow, s.gpuTemp, averageTemperature(2));
+
+        recentTemperatures.add(new TemperatureRecord(s.timestamp, s.batteryTemp, s.cpuTemp, s.gpuTemp));
+        while (recentTemperatures.size() > 5) recentTemperatures.remove(0);
+    }
+
+    private float averageTemperature(int kind) {
+        float sum = 0; int count = 0;
+        for (TemperatureRecord r : recentTemperatures) {
+            float value = kind == 0 ? r.battery : kind == 1 ? r.cpu : r.gpu;
+            if (!Float.isNaN(value)) { sum += value; count++; }
+        }
+        return count == 0 ? Float.NaN : sum / count;
+    }
+
+    private void setTemperatureArrow(TextView arrow, float current, float baseline) {
+        if (arrow == null || Float.isNaN(current) || Float.isNaN(baseline)) {
+            if (arrow != null) arrow.setText("");
+            return;
+        }
+        float shownCurrent = Math.round(current * 10f) / 10f;
+        float shownBaseline = Math.round(baseline * 10f) / 10f;
+        if (shownCurrent > shownBaseline) {
+            arrow.setText("↑");
+            arrow.setTextColor(Color.rgb(220, 38, 38));
+        } else if (shownCurrent < shownBaseline) {
+            arrow.setText("↓");
+            arrow.setTextColor(Color.rgb(37, 99, 235));
+        } else arrow.setText("");
     }
 
     private void renderHistory(boolean finished) {
@@ -308,21 +355,32 @@ public class MainActivity extends Activity {
         super.onDestroy();
     }
 
-    private TextView metricCard(LinearLayout parent, String label, String initial, int color) {
+    private TextView metricCard(LinearLayout parent, String label, String initial, int color, boolean showTrend) {
+        FrameLayout frame = new FrameLayout(this);
+        frame.setBackground(roundRect(Color.WHITE, 14));
         LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
         box.setGravity(android.view.Gravity.CENTER);
         box.setPadding(dp(5), dp(13), dp(5), dp(13));
-        box.setBackground(roundRect(Color.WHITE, 14));
         TextView name = text(label, 13, Color.rgb(100, 116, 139), true);
         TextView value = text(initial, 23, color, true);
         value.setGravity(android.view.Gravity.CENTER);
         box.addView(name);
         box.addView(value);
+        frame.addView(box, new FrameLayout.LayoutParams(-1, -1));
+        if (showTrend) {
+            TextView arrow = text("", 17, color, true);
+            arrow.setGravity(android.view.Gravity.CENTER);
+            FrameLayout.LayoutParams arrowParams = new FrameLayout.LayoutParams(dp(26), dp(28),
+                    android.view.Gravity.TOP | android.view.Gravity.END);
+            arrowParams.setMargins(0, dp(5), dp(7), 0);
+            frame.addView(arrow, arrowParams);
+            value.setTag(arrow);
+        }
         LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(0, dp(88), 1f);
         p.setMargins(parent.getChildCount() == 0 ? 0 : dp(5), 0, parent.getChildCount() == 0 ? dp(5) : 0, 0);
-        parent.addView(box, p);
-        box.setElevation(dp(1));
+        parent.addView(frame, p);
+        frame.setElevation(dp(1));
         return value;
     }
 
@@ -421,5 +479,19 @@ public class MainActivity extends Activity {
         long sec = Math.max(0, ms / 1000);
         if (sec >= 3600) return String.format(Locale.TAIWAN, "%d 小時 %02d 分 %02d 秒", sec / 3600, (sec / 60) % 60, sec % 60);
         return String.format(Locale.TAIWAN, "%d 分 %02d 秒", sec / 60, sec % 60);
+    }
+
+    private static final class TemperatureRecord {
+        final long timestamp;
+        final float battery;
+        final float cpu;
+        final float gpu;
+
+        TemperatureRecord(long timestamp, float battery, float cpu, float gpu) {
+            this.timestamp = timestamp;
+            this.battery = battery;
+            this.cpu = cpu;
+            this.gpu = gpu;
+        }
     }
 }
