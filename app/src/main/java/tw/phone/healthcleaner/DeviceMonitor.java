@@ -53,6 +53,7 @@ final class DeviceMonitor {
         collectMemoryAndStorage(s);
         collectBattery(s);
         collectThermal(s);
+        primeNetworkCounters();
         CpuTimes first = readCpuTimes();
         try { Thread.sleep(240); } catch (InterruptedException ignored) { Thread.currentThread().interrupt(); }
         CpuTimes second = readCpuTimes();
@@ -138,7 +139,7 @@ final class DeviceMonitor {
     }
 
     private void collectThermal(DeviceSnapshot s) {
-        float cpu = Float.NaN;
+        List<Float> cpuValues = new ArrayList<>();
         float gpu = Float.NaN;
         File root = new File("/sys/class/thermal");
         File[] zones = root.listFiles((dir, name) -> name.startsWith("thermal_zone"));
@@ -148,16 +149,40 @@ final class DeviceMonitor {
                 float value = parseTemperature(readText(new File(zone, "temp")));
                 if (Float.isNaN(value)) continue;
                 if (type.contains("gpu")) gpu = maxNan(gpu, value);
-                else if (type.contains("cpu") || type.contains("soc") || type.contains("cluster") || type.startsWith("ap"))
-                    cpu = maxNan(cpu, value);
+                else if (isCpuSensor(type)) cpuValues.add(value);
             }
         }
-        s.cpuTemp = cpu;
+        s.cpuTemp = selectCpuTemperature(cpuValues);
         s.gpuTemp = gpu;
         if (Build.VERSION.SDK_INT >= 29) {
             PowerManager pm = (PowerManager) context.getSystemService(Context.POWER_SERVICE);
-            if (pm != null) s.thermalStatus = thermalText(pm.getCurrentThermalStatus());
+            if (pm != null) {
+                int thermal = pm.getCurrentThermalStatus();
+                s.thermalStatus = thermalText(thermal);
+                // Some Qualcomm/Oplus devices expose a fixed 95°C protection value as if it
+                // were a live CPU sensor. Reject it when every independent signal says cool.
+                if (thermal == PowerManager.THERMAL_STATUS_NONE && s.cpuTemp >= 80f &&
+                        (Float.isNaN(s.batteryTemp) || s.batteryTemp < 50f) &&
+                        (Float.isNaN(s.gpuTemp) || s.gpuTemp < 70f)) s.cpuTemp = Float.NaN;
+            }
         }
+    }
+
+    private static boolean isCpuSensor(String type) {
+        if (!(type.contains("cpu") || type.contains("soc") || type.contains("cluster") || type.startsWith("ap")))
+            return false;
+        return !(type.contains("trip") || type.contains("limit") || type.contains("max") ||
+                type.contains("critical") || type.contains("shutdown") || type.contains("step"));
+    }
+
+    private static float selectCpuTemperature(List<Float> values) {
+        if (values.isEmpty()) return Float.NaN;
+        Collections.sort(values);
+        float median = values.get(values.size() / 2);
+        float selected = Float.NaN;
+        // Keep the hottest plausible live sensor, but discard isolated protection values.
+        for (float value : values) if (value <= median + 18f) selected = maxNan(selected, value);
+        return selected;
     }
 
     private void collectCpu(DeviceSnapshot s, CpuTimes a, CpuTimes b) {
@@ -224,6 +249,17 @@ final class DeviceMonitor {
         previousRx = rx;
         previousTx = tx;
         previousNetworkAt = now;
+    }
+
+    private void primeNetworkCounters() {
+        long now = android.os.SystemClock.elapsedRealtime();
+        long rx = TrafficStats.getTotalRxBytes();
+        long tx = TrafficStats.getTotalTxBytes();
+        if (previousNetworkAt < 0 || rx < previousRx || tx < previousTx) {
+            previousRx = rx;
+            previousTx = tx;
+            previousNetworkAt = now;
+        }
     }
 
     private String getGpuRenderer() {
