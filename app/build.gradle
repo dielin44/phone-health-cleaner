@@ -5,7 +5,7 @@ android {
     compileSdk 35
 
     defaultConfig {
-        applicationId 'tw.phone.healthcleaner'
+        applicationId 'tw.phone.statusmonitor'
         minSdk 26
         targetSdk 35
         versionCode 2
