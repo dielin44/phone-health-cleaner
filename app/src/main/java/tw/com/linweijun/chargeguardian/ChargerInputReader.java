@@ -37,7 +37,7 @@ final class ChargerInputReader {
             result.voltageUv = Math.abs(voltage);
             result.voltageSource = LIVE_INPUT;
         } else {
-            int maxVoltage = batteryIntent.getIntExtra(BatteryManager.EXTRA_MAX_CHARGING_VOLTAGE, 0);
+            int maxVoltage = batteryIntent.getIntExtra("max_charging_voltage", 0);
             if (validVoltage((long) maxVoltage)) {
                 result.voltageUv = Math.abs((long) maxVoltage);
                 result.voltageSource = NEGOTIATED_LIMIT;
@@ -48,7 +48,7 @@ final class ChargerInputReader {
             result.currentUa = Math.abs(current);
             result.currentSource = LIVE_INPUT;
         } else {
-            int maxCurrent = batteryIntent.getIntExtra(BatteryManager.EXTRA_MAX_CHARGING_CURRENT, 0);
+            int maxCurrent = batteryIntent.getIntExtra("max_charging_current", 0);
             if (validCurrent((long) maxCurrent)) {
                 result.currentUa = Math.abs((long) maxCurrent);
                 result.currentSource = NEGOTIATED_LIMIT;
