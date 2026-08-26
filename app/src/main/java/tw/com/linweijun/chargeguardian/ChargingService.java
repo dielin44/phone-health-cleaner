@@ -143,7 +143,7 @@ public class ChargingService extends Service {
     private void warn(String message) {
         Notification n = new Notification.Builder(this, WARNING_CHANNEL).setSmallIcon(R.drawable.ic_launcher)
                 .setContentTitle("充電守衛警告").setContentText(message).setStyle(new Notification.BigTextStyle().bigText(message))
-                .setSilent(true).setAutoCancel(true).build();
+                .setAutoCancel(true).build();
         getSystemService(NotificationManager.class).notify(42, n);
         int volume=getSharedPreferences("settings",MODE_PRIVATE).getInt("alertVolume",70);
         if(volume>0){
