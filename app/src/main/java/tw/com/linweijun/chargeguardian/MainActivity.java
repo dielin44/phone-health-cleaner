@@ -14,10 +14,10 @@ import java.util.Locale;
 public class MainActivity extends Activity {
     private LinearLayout root;
     private BatteryView battery;
-    private TextView status, voltage, current, elapsed, eta, incidents, capability, targetLabel, warning;
+    private TextView status, voltage, current, temperature, elapsed, eta, incidents, capability, targetLabel, warning;
     private SeekBar targetBar;
     private SeekBar alertVolumeBar;
-    private CheckBox fullBox, vibrationBox;
+    private CheckBox fullBox, vibrationBox, voiceBox;
     private TextView alertVolumeLabel;
     private Button startButton;
     private int target = 80;
@@ -56,6 +56,7 @@ public class MainActivity extends Activity {
 
         LinearLayout grid = new LinearLayout(this); grid.setOrientation(LinearLayout.VERTICAL); grid.setPadding(dp(14),dp(12),dp(14),dp(12)); grid.setBackground(panel());
         voltage = addRow(grid,"電池端電壓","—"); current = addRow(grid,"目前電流","—");
+        temperature = addRow(grid,"電池溫度","—");
         elapsed = addRow(grid,"已充電時間","00:00:00"); eta = addRow(grid,"預計達標","計算中");
         incidents = addRow(grid,"異常中斷","0 次"); capability = addRow(grid,"斷充能力","偵測中");
         LinearLayout.LayoutParams gp=lp(-1,-2); gp.setMargins(0,dp(8),0,dp(18)); root.addView(grid,gp);
@@ -81,6 +82,9 @@ public class MainActivity extends Activity {
         vibrationBox=new CheckBox(this); vibrationBox.setText("警告時震動"); vibrationBox.setTextColor(Color.WHITE); vibrationBox.setTextSize(16);
         vibrationBox.setChecked(getSharedPreferences("settings",MODE_PRIVATE).getBoolean("vibration",true));
         alertPanel.addView(vibrationBox,lp(-1,dp(44)));
+        voiceBox=new CheckBox(this); voiceBox.setText("達標時語音提醒"); voiceBox.setTextColor(Color.WHITE); voiceBox.setTextSize(16);
+        voiceBox.setChecked(getSharedPreferences("settings",MODE_PRIVATE).getBoolean("voice",true));
+        alertPanel.addView(voiceBox,lp(-1,dp(44)));
         alertVolumeBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener(){
             public void onProgressChanged(SeekBar s,int p,boolean user){
                 alertVolumeLabel.setText("提示音量："+p+"%");
@@ -89,6 +93,7 @@ public class MainActivity extends Activity {
             public void onStartTrackingTouch(SeekBar s){} public void onStopTrackingTouch(SeekBar s){}
         });
         vibrationBox.setOnCheckedChangeListener((b,checked)->getSharedPreferences("settings",MODE_PRIVATE).edit().putBoolean("vibration",checked).apply());
+        voiceBox.setOnCheckedChangeListener((b,checked)->getSharedPreferences("settings",MODE_PRIVATE).edit().putBoolean("voice",checked).apply());
         LinearLayout.LayoutParams ap=lp(-1,-2); ap.setMargins(0,dp(8),0,dp(8)); root.addView(alertPanel,ap);
 
         warning=text("尚未啟動保護",14,false); warning.setTextColor(Color.rgb(255,198,80)); warning.setGravity(Gravity.CENTER); root.addView(warning,lp(-1,dp(48)));
@@ -130,6 +135,7 @@ public class MainActivity extends Activity {
         status.setText(i.getBooleanExtra("cutoff",false)?"已達目標，充電已切斷":plugged?(charging?"正在充電":"已接電源，暫未充電"):"目前未連接充電器");
         voltage.setText(String.format(Locale.TAIWAN,"%.3f V",i.getIntExtra("voltage",0)/1000f));
         current.setText(String.format(Locale.TAIWAN,"%.0f mA",Math.abs(ua)/1000f));
+        temperature.setText(String.format(Locale.TAIWAN,"%.1f°C",i.getIntExtra("temp",0)/10f));
         elapsed.setText(duration(i.getLongExtra("elapsed",0))); long e=i.getLongExtra("eta",-1); eta.setText(e<0?"資料不足":duration(e));
         incidents.setText(i.getIntExtra("disconnects",0)+" 次");
         capability.setText(i.getBooleanExtra("root",false)?"支援真正斷充":"提醒模式（系統未授權）");

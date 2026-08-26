@@ -5,6 +5,7 @@ import android.content.*;
 import android.os.*;
 import android.media.AudioManager;
 import android.media.ToneGenerator;
+import android.speech.tts.TextToSpeech;
 import java.util.Locale;
 
 public class ChargingService extends Service {
@@ -25,6 +26,9 @@ public class ChargingService extends Service {
     private boolean targetAlerted;
     private boolean voltageAlerted;
     private boolean temperatureAlerted;
+    private TextToSpeech textToSpeech;
+    private boolean speechReady;
+    private String pendingSpeech;
     private BroadcastReceiver batteryReceiver;
 
     @Override public void onCreate() {
@@ -34,6 +38,18 @@ public class ChargingService extends Service {
         NotificationChannel warningChannel = new NotificationChannel(WARNING_CHANNEL, "充電異常警告", NotificationManager.IMPORTANCE_HIGH);
         warningChannel.setSound(null, null); warningChannel.enableVibration(false);
         nm.createNotificationChannel(warningChannel);
+        textToSpeech = new TextToSpeech(this, status -> {
+            if (status == TextToSpeech.SUCCESS) {
+                int result = textToSpeech.setLanguage(Locale.TAIWAN);
+                if (result == TextToSpeech.LANG_MISSING_DATA || result == TextToSpeech.LANG_NOT_SUPPORTED)
+                    result = textToSpeech.setLanguage(Locale.CHINESE);
+                speechReady = result != TextToSpeech.LANG_MISSING_DATA && result != TextToSpeech.LANG_NOT_SUPPORTED;
+                if (speechReady && pendingSpeech != null) {
+                    speak(pendingSpeech);
+                    pendingSpeech = null;
+                }
+            }
+        });
         batteryReceiver = new BroadcastReceiver() {
             @Override public void onReceive(Context c, Intent i) { handleBattery(i); }
         };
@@ -105,8 +121,13 @@ public class ChargingService extends Service {
         boolean root = rootCapable;
         if (plugged && percent >= target && !cutoff && !targetAlerted) {
             cutoff = root && ChargeController.setCharging(false);
-            if (cutoff) warn("已達 " + target + "% 並切斷充電；拔線後才會重置");
-            else warn("已達 " + target + "%；系統未授權自動斷電，請拔除充電線");
+            if (cutoff) {
+                warn("已達 " + target + "% 並切斷充電；拔線後才會重置");
+                speakTarget("充電已達" + target + "%，已停止充電");
+            } else {
+                warn("已達 " + target + "%；系統未授權自動斷電，請拔除充電線");
+                speakTarget("充電已達" + target + "%，請拔除充電線");
+            }
             targetAlerted = true;
         }
 
@@ -161,8 +182,22 @@ public class ChargingService extends Service {
         }
     }
 
+    private void speakTarget(String message) {
+        if (!getSharedPreferences("settings",MODE_PRIVATE).getBoolean("voice",true)) return;
+        if (speechReady) speak(message); else pendingSpeech = message;
+    }
+
+    private void speak(String message) {
+        if (textToSpeech == null) return;
+        int volume=getSharedPreferences("settings",MODE_PRIVATE).getInt("alertVolume",70);
+        Bundle params=new Bundle();
+        params.putFloat(TextToSpeech.Engine.KEY_PARAM_VOLUME,volume/100f);
+        textToSpeech.speak(message,TextToSpeech.QUEUE_FLUSH,params,"charge_target");
+    }
+
     @Override public void onDestroy() {
         if (batteryReceiver != null) unregisterReceiver(batteryReceiver);
+        if (textToSpeech != null) { textToSpeech.stop(); textToSpeech.shutdown(); }
         super.onDestroy();
     }
     @Override public android.os.IBinder onBind(Intent intent) { return null; }
