@@ -6,6 +6,7 @@ import android.os.*;
 import android.media.AudioManager;
 import android.media.ToneGenerator;
 import android.speech.tts.TextToSpeech;
+import java.util.ArrayDeque;
 import java.util.Locale;
 
 public class ChargingService extends Service {
@@ -17,6 +18,8 @@ public class ChargingService extends Service {
     private static final String WARNING_CHANNEL = "charge_warning_silent_v1";
     private final Handler handler = new Handler(Looper.getMainLooper());
     private long sessionStart;
+    private long voltageAbnormalSince;
+    private long lastNotificationAt;
     private int target;
     private boolean lastPlugged;
     private boolean cutoff;
@@ -29,7 +32,17 @@ public class ChargingService extends Service {
     private TextToSpeech textToSpeech;
     private boolean speechReady;
     private String pendingSpeech;
+    private final ArrayDeque<Long> currentSamples = new ArrayDeque<>();
+    private PowerManager.WakeLock wakeLock;
     private BroadcastReceiver batteryReceiver;
+    private final Runnable ticker = new Runnable() {
+        @Override public void run() {
+            if (!started) return;
+            Intent battery = registerReceiver(null, new IntentFilter(Intent.ACTION_BATTERY_CHANGED));
+            if (battery != null) handleBattery(battery);
+            handler.postDelayed(this, 1000);
+        }
+    };
 
     @Override public void onCreate() {
         super.onCreate();
@@ -51,13 +64,18 @@ public class ChargingService extends Service {
             }
         });
         batteryReceiver = new BroadcastReceiver() {
-            @Override public void onReceive(Context c, Intent i) { handleBattery(i); }
+            @Override public void onReceive(Context c, Intent i) {
+                if (started) handleBattery(i);
+            }
         };
         registerReceiver(batteryReceiver, new IntentFilter(Intent.ACTION_BATTERY_CHANGED));
     }
 
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent != null && ACTION_CANCEL.equals(intent.getAction())) {
+            started = false;
+            handler.removeCallbacks(ticker);
+            releaseWakeLock();
             ChargeController.setCharging(true);
             getSharedPreferences("state", MODE_PRIVATE).edit().putBoolean("active", false).apply();
             stopForeground(STOP_FOREGROUND_REMOVE);
@@ -65,17 +83,27 @@ public class ChargingService extends Service {
             sendBroadcast(new Intent(ACTION_UPDATE).setPackage(getPackageName()).putExtra("stopped", true));
             return START_NOT_STICKY;
         }
+        boolean newSession = intent != null && ACTION_START.equals(intent.getAction());
         target = intent == null
                 ? getSharedPreferences("state", MODE_PRIVATE).getInt("target", 80)
                 : intent.getIntExtra(EXTRA_TARGET, 80);
-        sessionStart = getSharedPreferences("state", MODE_PRIVATE).getLong("sessionStart", System.currentTimeMillis());
-        disconnects = getSharedPreferences("state", MODE_PRIVATE).getInt("disconnects", 0);
+        sessionStart = newSession ? System.currentTimeMillis()
+                : getSharedPreferences("state", MODE_PRIVATE).getLong("sessionStart", System.currentTimeMillis());
+        disconnects = newSession ? 0 : getSharedPreferences("state", MODE_PRIVATE).getInt("disconnects", 0);
+        if (newSession) {
+            currentSamples.clear();
+            targetAlerted = false;
+            voltageAlerted = false;
+            temperatureAlerted = false;
+            voltageAbnormalSince = 0;
+        }
         getSharedPreferences("state", MODE_PRIVATE).edit()
                 .putBoolean("active", true).putInt("target", target).putLong("sessionStart", sessionStart).apply();
         started = true;
+        acquireWakeLock();
         startForeground(41, notification("正在監測充電狀態"));
-        Intent sticky = registerReceiver(null, new IntentFilter(Intent.ACTION_BATTERY_CHANGED));
-        if (sticky != null) handleBattery(sticky);
+        handler.removeCallbacks(ticker);
+        handler.post(ticker);
         return START_STICKY;
     }
 
@@ -90,9 +118,13 @@ public class ChargingService extends Service {
         boolean charging = status == BatteryManager.BATTERY_STATUS_CHARGING;
         int voltage = i.getIntExtra(BatteryManager.EXTRA_VOLTAGE, 0);
         int temp = i.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, 0);
+        int health = i.getIntExtra(BatteryManager.EXTRA_HEALTH, BatteryManager.BATTERY_HEALTH_UNKNOWN);
         BatteryManager bm = getSystemService(BatteryManager.class);
-        long current = bm.getLongProperty(BatteryManager.BATTERY_PROPERTY_CURRENT_NOW);
-        if (current == Long.MIN_VALUE) current = 0;
+        long rawCurrent = bm.getLongProperty(BatteryManager.BATTERY_PROPERTY_CURRENT_NOW);
+        if (rawCurrent == Long.MIN_VALUE) rawCurrent = 0;
+        currentSamples.addLast(rawCurrent);
+        while (currentSamples.size() > 5) currentSamples.removeFirst();
+        long current = averageCurrent();
 
         if (lastPlugged && !plugged && !cutoff && percent < target) {
             disconnects++;
@@ -102,6 +134,7 @@ public class ChargingService extends Service {
         if (!lastPlugged && plugged) {
             cutoff = false;
             targetAlerted = false;
+            currentSamples.clear();
             ChargeController.setCharging(true);
             sessionStart = System.currentTimeMillis();
             getSharedPreferences("state", MODE_PRIVATE).edit().putLong("sessionStart", sessionStart).apply();
@@ -109,10 +142,18 @@ public class ChargingService extends Service {
         lastPlugged = plugged;
 
         String warning = "";
-        if (plugged && voltage > 0 && (voltage < 3200 || voltage > 4450)) {
-            warning = "電池端電壓異常（這不是充電器輸入電壓），請停止充電並檢查設備";
+        long now = System.currentTimeMillis();
+        boolean systemOverVoltage = health == BatteryManager.BATTERY_HEALTH_OVER_VOLTAGE;
+        if (plugged && voltage >= 4650) {
+            if (voltageAbnormalSince == 0) voltageAbnormalSince = now;
+        } else if (voltage < 4600) {
+            voltageAbnormalSince = 0;
+        }
+        boolean sustainedOverVoltage = voltageAbnormalSince > 0 && now - voltageAbnormalSince >= 10_000;
+        if (plugged && (systemOverVoltage || sustainedOverVoltage)) {
+            warning = String.format(Locale.TAIWAN,"電池端電壓異常：%.3fV，請停止充電並檢查設備",voltage/1000f);
             if (!voltageAlerted) { warn(warning); voltageAlerted = true; }
-        } else voltageAlerted = false;
+        } else if (voltage < 4600 && !systemOverVoltage) voltageAlerted = false;
         if (plugged && temp >= 450) {
             warning = "電池溫度已達 45°C，建議立即停止充電並降溫";
             if (!temperatureAlerted) { warn(warning); temperatureAlerted = true; }
@@ -140,8 +181,18 @@ public class ChargingService extends Service {
                 .putExtra("active", true).putExtra("cutoff", cutoff).putExtra("root", root)
                 .putExtra("warning", warning).putExtra("target", target);
         sendBroadcast(u);
-        getSystemService(NotificationManager.class).notify(41,
-                notification(String.format(Locale.TAIWAN, "%d%% · 目標 %d%% · 中斷 %d 次", percent, target, disconnects)));
+        if (now - lastNotificationAt >= 15_000) {
+            lastNotificationAt = now;
+            getSystemService(NotificationManager.class).notify(41,
+                    notification(String.format(Locale.TAIWAN, "%d%% · 目標 %d%% · 中斷 %d 次", percent, target, disconnects)));
+        }
+    }
+
+    private long averageCurrent() {
+        if (currentSamples.isEmpty()) return 0;
+        long total = 0;
+        for (long sample : currentSamples) total += sample;
+        return total / currentSamples.size();
     }
 
     private long estimateEta(BatteryManager bm, int percent, long currentUa) {
@@ -195,7 +246,21 @@ public class ChargingService extends Service {
         textToSpeech.speak(message,TextToSpeech.QUEUE_FLUSH,params,"charge_target");
     }
 
+    private void acquireWakeLock() {
+        if (wakeLock != null && wakeLock.isHeld()) return;
+        PowerManager pm=getSystemService(PowerManager.class);
+        wakeLock=pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK,getPackageName()+":charge-monitor");
+        wakeLock.acquire();
+    }
+
+    private void releaseWakeLock() {
+        if (wakeLock != null && wakeLock.isHeld()) wakeLock.release();
+    }
+
     @Override public void onDestroy() {
+        started = false;
+        handler.removeCallbacks(ticker);
+        releaseWakeLock();
         if (batteryReceiver != null) unregisterReceiver(batteryReceiver);
         if (textToSpeech != null) { textToSpeech.stop(); textToSpeech.shutdown(); }
         super.onDestroy();

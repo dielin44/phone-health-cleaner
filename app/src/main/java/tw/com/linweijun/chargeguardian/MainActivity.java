@@ -55,11 +55,13 @@ public class MainActivity extends Activity {
         battery = new BatteryView(this); root.addView(battery, lp(dp(245),dp(300)));
 
         LinearLayout grid = new LinearLayout(this); grid.setOrientation(LinearLayout.VERTICAL); grid.setPadding(dp(14),dp(12),dp(14),dp(12)); grid.setBackground(panel());
-        voltage = addRow(grid,"電池端電壓","—"); current = addRow(grid,"目前電流","—");
+        voltage = addRow(grid,"電池端電壓","—"); current = addRow(grid,"電池淨電流（5秒平均）","—");
         temperature = addRow(grid,"電池溫度","—");
         elapsed = addRow(grid,"已充電時間","00:00:00"); eta = addRow(grid,"預計達標","計算中");
         incidents = addRow(grid,"異常中斷","0 次"); capability = addRow(grid,"斷充能力","偵測中");
         LinearLayout.LayoutParams gp=lp(-1,-2); gp.setMargins(0,dp(8),0,dp(18)); root.addView(grid,gp);
+        TextView limits=text("警告標準：電池端 ≥4.65V 持續10秒｜溫度 ≥45°C",13,false);
+        limits.setTextColor(Color.rgb(255,198,80)); limits.setGravity(Gravity.START); root.addView(limits,lp(-1,dp(34)));
 
         targetLabel=text("保護目標：80%",20,true); targetLabel.setGravity(Gravity.START); root.addView(targetLabel,lp(-1,dp(42)));
         LinearLayout chooser=new LinearLayout(this); chooser.setOrientation(LinearLayout.HORIZONTAL); chooser.setGravity(Gravity.CENTER_VERTICAL);
@@ -134,7 +136,7 @@ public class MainActivity extends Activity {
         long ua=i.getLongExtra("current",0); battery.update(p,charging); applyColor(p);
         status.setText(i.getBooleanExtra("cutoff",false)?"已達目標，充電已切斷":plugged?(charging?"正在充電":"已接電源，暫未充電"):"目前未連接充電器");
         voltage.setText(String.format(Locale.TAIWAN,"%.3f V",i.getIntExtra("voltage",0)/1000f));
-        current.setText(String.format(Locale.TAIWAN,"%.0f mA",Math.abs(ua)/1000f));
+        current.setText(String.format(Locale.TAIWAN,"%s %.0f mA",charging?"淨充入":"淨耗電",Math.abs(ua)/1000f));
         temperature.setText(String.format(Locale.TAIWAN,"%.1f°C",i.getIntExtra("temp",0)/10f));
         elapsed.setText(duration(i.getLongExtra("elapsed",0))); long e=i.getLongExtra("eta",-1); eta.setText(e<0?"資料不足":duration(e));
         incidents.setText(i.getIntExtra("disconnects",0)+" 次");
