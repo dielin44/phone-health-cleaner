@@ -55,12 +55,12 @@ public class MainActivity extends Activity {
         battery = new BatteryView(this); root.addView(battery, lp(dp(245),dp(300)));
 
         LinearLayout grid = new LinearLayout(this); grid.setOrientation(LinearLayout.VERTICAL); grid.setPadding(dp(14),dp(12),dp(14),dp(12)); grid.setBackground(panel());
-        voltage = addRow(grid,"電池端電壓","—"); current = addRow(grid,"電池淨電流（5秒平均）","—");
+        voltage = addRow(grid,"充電輸入電壓","—"); current = addRow(grid,"充電輸入電流","—");
         temperature = addRow(grid,"電池溫度","—");
         elapsed = addRow(grid,"已充電時間","00:00:00"); eta = addRow(grid,"預計達標","計算中");
         incidents = addRow(grid,"異常中斷","0 次"); capability = addRow(grid,"斷充能力","偵測中");
         LinearLayout.LayoutParams gp=lp(-1,-2); gp.setMargins(0,dp(8),0,dp(18)); root.addView(grid,gp);
-        TextView limits=text("警告標準：電池端 ≥4.65V 持續10秒｜溫度 ≥45°C",13,false);
+        TextView limits=text("安全監測：電池端 ≥4.65V 持續10秒｜溫度 ≥45°C",13,false);
         limits.setTextColor(Color.rgb(255,198,80)); limits.setGravity(Gravity.START); root.addView(limits,lp(-1,dp(34)));
 
         targetLabel=text("保護目標：80%",20,true); targetLabel.setGravity(Gravity.START); root.addView(targetLabel,lp(-1,dp(42)));
@@ -133,10 +133,12 @@ public class MainActivity extends Activity {
     private void render(Intent i){
         if(i.getBooleanExtra("stopped",false)){ warning.setText("保護已停止"); setProtectionUi(false); return; }
         int p=i.getIntExtra("percent",0); boolean plugged=i.getBooleanExtra("plugged",false), charging=i.getBooleanExtra("charging",false);
-        long ua=i.getLongExtra("current",0); battery.update(p,charging); applyColor(p);
+        long inputUv=i.getLongExtra("inputVoltage",0), inputUa=i.getLongExtra("inputCurrent",0);
+        int voltageSource=i.getIntExtra("inputVoltageSource",0), currentSource=i.getIntExtra("inputCurrentSource",0);
+        battery.update(p,charging); applyColor(p);
         status.setText(i.getBooleanExtra("cutoff",false)?"已達目標，充電已切斷":plugged?(charging?"正在充電":"已接電源，暫未充電"):"目前未連接充電器");
-        voltage.setText(String.format(Locale.TAIWAN,"%.3f V",i.getIntExtra("voltage",0)/1000f));
-        current.setText(String.format(Locale.TAIWAN,"%s %.0f mA",charging?"淨充入":"淨耗電",Math.abs(ua)/1000f));
+        voltage.setText(formatInput(inputUv, voltageSource, true));
+        current.setText(formatInput(inputUa, currentSource, false));
         temperature.setText(String.format(Locale.TAIWAN,"%.1f°C",i.getIntExtra("temp",0)/10f));
         elapsed.setText(duration(i.getLongExtra("elapsed",0))); long e=i.getLongExtra("eta",-1); eta.setText(e<0?"資料不足":duration(e));
         incidents.setText(i.getIntExtra("disconnects",0)+" 次");
@@ -152,6 +154,11 @@ public class MainActivity extends Activity {
         targetLabel.setText("保護目標："+target+"%"+(active?"（已鎖定）":""));
     }
     private String duration(long ms){ long s=Math.max(0,ms/1000),h=s/3600,m=(s%3600)/60; return String.format(Locale.TAIWAN,"%02d:%02d:%02d",h,m,s%60); }
+    private String formatInput(long microValue,int source,boolean volts){
+        if(source==ChargerInputReader.UNAVAILABLE || microValue<=0) return "手機未提供";
+        String value=volts?String.format(Locale.TAIWAN,"%.2f V",microValue/1_000_000f):String.format(Locale.TAIWAN,"%.0f mA",microValue/1000f);
+        return source==ChargerInputReader.LIVE_INPUT?value+" 即時":value+" 協議上限";
+    }
     private TextView addRow(LinearLayout box,String label,String initial){ LinearLayout row=new LinearLayout(this); row.setGravity(Gravity.CENTER_VERTICAL); TextView l=text(label,15,false); l.setTextColor(Color.LTGRAY); TextView v=text(initial,16,true); v.setGravity(Gravity.END); row.addView(l,new LinearLayout.LayoutParams(0,dp(38),1)); row.addView(v,new LinearLayout.LayoutParams(0,dp(38),1)); box.addView(row); return v; }
     private TextView text(String s,int sp,boolean bold){ TextView v=new TextView(this); v.setText(s); v.setTextSize(sp); v.setTextColor(Color.WHITE); v.setGravity(Gravity.CENTER); if(bold)v.setTypeface(null,android.graphics.Typeface.BOLD); return v; }
     private Button button(String s,int color){ Button b=new Button(this); b.setText(s); b.setTextColor(Color.WHITE); b.setTextSize(17); b.setAllCaps(false); GradientDrawable g=new GradientDrawable();g.setColor(color);g.setCornerRadius(dp(14));b.setBackground(g);return b; }

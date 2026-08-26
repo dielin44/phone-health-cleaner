@@ -124,7 +124,8 @@ public class ChargingService extends Service {
         if (rawCurrent == Long.MIN_VALUE) rawCurrent = 0;
         currentSamples.addLast(rawCurrent);
         while (currentSamples.size() > 5) currentSamples.removeFirst();
-        long current = averageCurrent();
+        long batteryNetCurrent = medianAbsoluteCurrent();
+        ChargerInputReader.Reading input = ChargerInputReader.read(i);
 
         if (lastPlugged && !plugged && !cutoff && percent < target) {
             disconnects++;
@@ -173,9 +174,11 @@ public class ChargingService extends Service {
         }
 
         long elapsed = plugged ? Math.max(0, System.currentTimeMillis() - sessionStart) : 0;
-        long eta = estimateEta(bm, percent, current);
+        long eta = estimateEta(bm, percent, batteryNetCurrent);
         Intent u = new Intent(ACTION_UPDATE).setPackage(getPackageName())
-                .putExtra("percent", percent).putExtra("voltage", voltage).putExtra("current", current)
+                .putExtra("percent", percent).putExtra("batteryVoltage", voltage)
+                .putExtra("inputVoltage", input.voltageUv).putExtra("inputCurrent", input.currentUa)
+                .putExtra("inputVoltageSource", input.voltageSource).putExtra("inputCurrentSource", input.currentSource)
                 .putExtra("temp", temp).putExtra("plugged", plugged).putExtra("charging", charging)
                 .putExtra("elapsed", elapsed).putExtra("eta", eta).putExtra("disconnects", disconnects)
                 .putExtra("active", true).putExtra("cutoff", cutoff).putExtra("root", root)
@@ -188,11 +191,13 @@ public class ChargingService extends Service {
         }
     }
 
-    private long averageCurrent() {
+    private long medianAbsoluteCurrent() {
         if (currentSamples.isEmpty()) return 0;
-        long total = 0;
-        for (long sample : currentSamples) total += sample;
-        return total / currentSamples.size();
+        Long[] values = new Long[currentSamples.size()];
+        int index = 0;
+        for (long sample : currentSamples) values[index++] = Math.abs(sample);
+        java.util.Arrays.sort(values);
+        return values[values.length / 2];
     }
 
     private long estimateEta(BatteryManager bm, int percent, long currentUa) {
