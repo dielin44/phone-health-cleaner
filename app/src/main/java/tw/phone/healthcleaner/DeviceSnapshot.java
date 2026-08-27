@@ -44,6 +44,12 @@ final class DeviceSnapshot {
     boolean internetValidated;
     long downloadBps = -1;
     long uploadBps = -1;
+    long pingMs = -1;
+    String mobileGeneration = "";
+    String currentBand = "";
+    String bandDetails = "";
+    int signalDbm = Integer.MIN_VALUE;
+    int signalLevel = -1;
 
     static final class CoreGroup {
         String label;

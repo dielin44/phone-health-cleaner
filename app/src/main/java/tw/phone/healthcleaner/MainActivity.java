@@ -1,6 +1,8 @@
 package tw.phone.healthcleaner;
 
+import android.Manifest;
 import android.app.Activity;
+import android.content.pm.PackageManager;
 import android.content.res.ColorStateList;
 import android.graphics.Color;
 import android.graphics.Typeface;
@@ -18,20 +20,27 @@ import android.widget.TextView;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
 public class MainActivity extends Activity {
+    private static final int REQUEST_BAND_PERMISSION = 701;
+    private static final int PENDING_NONE = 0;
+    private static final int PENDING_DETECT = 1;
+    private static final int PENDING_MONITOR = 2;
     private static final String PREF_HISTORY = "last_history";
     private static final String PREF_HISTORY_END = "last_history_end";
     private final ExecutorService detector = Executors.newSingleThreadExecutor();
     private final Handler main = new Handler(Looper.getMainLooper());
     private final List<HistoryPoint> history = new ArrayList<>();
     private final List<TemperatureRecord> recentTemperatures = new ArrayList<>();
+    private final Map<String, Long> bandUsageMs = new LinkedHashMap<>();
 
     private DeviceMonitor deviceMonitor;
     private ScheduledExecutorService liveExecutor;
@@ -39,11 +48,15 @@ public class MainActivity extends Activity {
     private boolean hasDetected;
     private long monitoringStartedAt;
     private long lastHistoryPointAt;
+    private long lastBandSampleAt;
+    private long totalBandUsageMs;
+    private String lastBand = "";
+    private int pendingPermissionAction;
 
     private TextView status;
     private TextView batteryTempValue, cpuTempValue, gpuTempValue;
     private TextView batteryTempArrow, cpuTempArrow, gpuTempArrow;
-    private TextView downloadValue, uploadValue;
+    private TextView downloadValue, uploadValue, pingValue;
     private TextView deviceDetails, cpuDetails, batteryDetails, memoryDetails, networkDetails;
     private TextView historyTitle, historySummary;
     private TrendChartView temperatureChart, batteryChart;
@@ -89,6 +102,7 @@ public class MainActivity extends Activity {
         LinearLayout network = horizontal();
         downloadValue = metricCard(network, "下載", "— KB/s", Color.rgb(37, 99, 235), false);
         uploadValue = metricCard(network, "上傳", "— KB/s", Color.rgb(5, 150, 105), false);
+        pingValue = metricCard(network, "Ping", "— ms", Color.rgb(124, 58, 237), false);
         root.addView(network);
         networkDetails = detailText("連線資訊尚未檢測");
         root.addView(card(networkDetails));
@@ -133,7 +147,7 @@ public class MainActivity extends Activity {
         root.addView(exit, exitParams);
         exit.setOnClickListener(v -> exitApplication());
 
-        TextView note = text("說明：一般 Android App 無法保證讀到每款手機的 CPU／GPU 實際溫度、電池循環與容量。系統未提供時會明確標示，不會用猜測數字代替。即時流量是手機當下傳輸量，不是網路測速。", 12, Color.rgb(100, 116, 139), false);
+        TextView note = text("說明：一般 Android App 無法保證讀到每款手機的 CPU／GPU 實際溫度、電池循環與容量。系統未提供時會明確標示，不會用猜測數字代替。頻段需位置權限；使用占比是本次監測期間手機實際連線時間，不代表基地台總負載。Ping 為連到公共節點的網路往返時間。", 12, Color.rgb(100, 116, 139), false);
         note.setPadding(dp(2), dp(14), dp(2), 0);
         root.addView(note);
         setContentView(scroll);
@@ -141,6 +155,11 @@ public class MainActivity extends Activity {
 
     private void runOneTimeDetection() {
         if (monitoring) return;
+        if (requestBandPermission(PENDING_DETECT)) return;
+        performOneTimeDetection();
+    }
+
+    private void performOneTimeDetection() {
         detectButton.setEnabled(false);
         monitorButton.setEnabled(false);
         status.setText("正在完整檢測，約需 1 秒…");
@@ -159,13 +178,17 @@ public class MainActivity extends Activity {
 
     private void toggleMonitoring() {
         if (monitoring) stopMonitoring(true);
-        else startMonitoring();
+        else if (!requestBandPermission(PENDING_MONITOR)) startMonitoring();
     }
 
     private void startMonitoring() {
         monitoring = true;
         history.clear();
         recentTemperatures.clear();
+        bandUsageMs.clear();
+        totalBandUsageMs = 0;
+        lastBandSampleAt = 0;
+        lastBand = "";
         monitoringStartedAt = System.currentTimeMillis();
         lastHistoryPointAt = 0;
         detectButton.setEnabled(false);
@@ -220,9 +243,20 @@ public class MainActivity extends Activity {
         gpuTempValue.setText(temp(s.gpuTemp));
         downloadValue.setText(rate(s.downloadBps));
         uploadValue.setText(rate(s.uploadBps));
+        pingValue.setText(ping(s.pingMs));
 
-        networkDetails.setText("連線：" + s.networkType + (s.internetValidated ? "｜網際網路正常" : "｜尚未驗證") +
-                "\n下載：" + rate(s.downloadBps) + "　上傳：" + rate(s.uploadBps));
+        if (monitoring) updateBandUsage(s);
+        String connection = s.networkType + (s.mobileGeneration.isEmpty() ? "" : " " + s.mobileGeneration);
+        String band = s.currentBand.isEmpty() ? "系統未提供" : s.currentBand;
+        String tower = s.bandDetails.isEmpty() ? "手機系統未提供" : s.bandDetails;
+        String signal = s.signalDbm == Integer.MIN_VALUE ? "系統未提供" :
+                s.signalDbm + " dBm｜" + signalQuality(s.signalLevel);
+        String usage = monitoring || totalBandUsageMs > 0 ? bandUsageText() : "開始即時監測後統計";
+        networkDetails.setText("連線：" + connection + (s.internetValidated ? "｜網際網路正常" : "｜尚未驗證") +
+                "\n目前頻段：" + band + "｜訊號：" + signal +
+                "\n基地台頻段：" + tower +
+                "\n即時 Ping：" + ping(s.pingMs) +
+                "\n本次頻段使用占比：" + usage);
 
         StringBuilder core = new StringBuilder();
         core.append("CPU 總使用率：").append(percent(s.cpuUsage)).append("｜總核心：").append(s.coreCount).append(" 核");
@@ -278,6 +312,48 @@ public class MainActivity extends Activity {
 
         recentTemperatures.add(new TemperatureRecord(s.timestamp, s.batteryTemp, s.cpuTemp, s.gpuTemp));
         while (recentTemperatures.size() > 5) recentTemperatures.remove(0);
+    }
+
+    private void updateBandUsage(DeviceSnapshot s) {
+        if (lastBandSampleAt > 0 && !lastBand.isEmpty()) {
+            long elapsed = Math.max(0, Math.min(10_000, s.timestamp - lastBandSampleAt));
+            bandUsageMs.put(lastBand, bandUsageMs.getOrDefault(lastBand, 0L) + elapsed);
+            totalBandUsageMs += elapsed;
+        }
+        lastBandSampleAt = s.timestamp;
+        lastBand = s.currentBand;
+    }
+
+    private String bandUsageText() {
+        if (totalBandUsageMs <= 0) return "正在收集資料…";
+        StringBuilder out = new StringBuilder();
+        for (Map.Entry<String, Long> entry : bandUsageMs.entrySet()) {
+            if (entry.getValue() <= 0) continue;
+            if (out.length() > 0) out.append("　");
+            long pct = Math.round(entry.getValue() * 100d / totalBandUsageMs);
+            out.append(entry.getKey()).append(" ").append(pct).append("%")
+                    .append("（").append(shortDuration(entry.getValue())).append("）");
+        }
+        return out.length() == 0 ? "尚未取得頻段" : out.toString();
+    }
+
+    private boolean requestBandPermission(int action) {
+        if (android.os.Build.VERSION.SDK_INT < 23 ||
+                checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED)
+            return false;
+        pendingPermissionAction = action;
+        requestPermissions(new String[]{Manifest.permission.ACCESS_FINE_LOCATION,
+                Manifest.permission.ACCESS_COARSE_LOCATION}, REQUEST_BAND_PERMISSION);
+        return true;
+    }
+
+    @Override public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode != REQUEST_BAND_PERMISSION) return;
+        int action = pendingPermissionAction;
+        pendingPermissionAction = PENDING_NONE;
+        if (action == PENDING_DETECT) performOneTimeDetection();
+        else if (action == PENDING_MONITOR) startMonitoring();
     }
 
     private float averageTemperature(int kind) {
@@ -472,6 +548,22 @@ public class MainActivity extends Activity {
         if (bps < 1024) return bps + " B/s";
         if (bps < 1024 * 1024) return String.format(Locale.TAIWAN, "%.1f KB/s", bps / 1024f);
         return String.format(Locale.TAIWAN, "%.2f MB/s", bps / 1024f / 1024f);
+    }
+
+    private static String ping(long ms) { return ms < 0 ? "逾時" : ms + " ms"; }
+    private static String signalQuality(int level) {
+        switch (level) {
+            case 4: return "極佳";
+            case 3: return "良好";
+            case 2: return "普通";
+            case 1: return "偏弱";
+            case 0: return "很弱";
+            default: return "未知";
+        }
+    }
+    private static String shortDuration(long ms) {
+        long sec = Math.max(0, ms / 1000);
+        return sec >= 60 ? String.format(Locale.TAIWAN, "%d分%02d秒", sec / 60, sec % 60) : sec + "秒";
     }
 
     private static String time(long t) { return new SimpleDateFormat("HH:mm:ss", Locale.TAIWAN).format(new Date(t)); }

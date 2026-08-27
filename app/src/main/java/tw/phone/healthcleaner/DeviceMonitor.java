@@ -1,9 +1,11 @@
 package tw.phone.healthcleaner;
 
 import android.app.ActivityManager;
+import android.Manifest;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.content.pm.PackageManager;
 import android.graphics.Point;
 import android.net.ConnectivityManager;
 import android.net.Network;
@@ -14,6 +16,15 @@ import android.os.Build;
 import android.os.Environment;
 import android.os.PowerManager;
 import android.os.StatFs;
+import android.telephony.CellIdentityLte;
+import android.telephony.CellIdentityNr;
+import android.telephony.CellInfo;
+import android.telephony.CellInfoLte;
+import android.telephony.CellInfoNr;
+import android.telephony.CellSignalStrength;
+import android.telephony.CellSignalStrengthLte;
+import android.telephony.CellSignalStrengthNr;
+import android.telephony.TelephonyManager;
 import android.view.Display;
 import android.view.WindowManager;
 
@@ -21,6 +32,8 @@ import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.InputStreamReader;
+import java.net.InetSocketAddress;
+import java.net.Socket;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -59,6 +72,8 @@ final class DeviceMonitor {
         CpuTimes second = readCpuTimes();
         collectCpu(s, first, second);
         collectNetwork(s);
+        collectRadio(s);
+        s.pingMs = measurePing();
         return s;
     }
 
@@ -249,6 +264,100 @@ final class DeviceMonitor {
         previousRx = rx;
         previousTx = tx;
         previousNetworkAt = now;
+    }
+
+    private void collectRadio(DeviceSnapshot s) {
+        if (context.checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+            s.bandDetails = "需要允許位置權限才能讀取行動網路頻段";
+            return;
+        }
+        TelephonyManager tm = (TelephonyManager) context.getSystemService(Context.TELEPHONY_SERVICE);
+        if (tm == null) return;
+        try {
+            List<CellInfo> cells = tm.getAllCellInfo();
+            if (cells == null) return;
+            List<String> nrBands = new ArrayList<>();
+            List<String> lteBands = new ArrayList<>();
+            CellSignalStrength nrSignal = null;
+            CellSignalStrength lteSignal = null;
+            int lteBandwidthKhz = -1;
+
+            for (CellInfo cell : cells) {
+                if (!cell.isRegistered()) continue;
+                if (Build.VERSION.SDK_INT >= 29 && cell instanceof CellInfoNr) {
+                    CellInfoNr nr = (CellInfoNr) cell;
+                    CellIdentityNr identity = (CellIdentityNr) nr.getCellIdentity();
+                    if (Build.VERSION.SDK_INT >= 30) {
+                        for (int band : identity.getBands()) addUnique(nrBands, "5G n" + band);
+                    }
+                    if (nrBands.isEmpty() && identity.getNrarfcn() != CellInfo.UNAVAILABLE)
+                        addUnique(nrBands, "5G（NR-ARFCN " + identity.getNrarfcn() + "）");
+                    if (nrSignal == null) nrSignal = nr.getCellSignalStrength();
+                } else if (cell instanceof CellInfoLte) {
+                    CellInfoLte lte = (CellInfoLte) cell;
+                    CellIdentityLte identity = lte.getCellIdentity();
+                    if (Build.VERSION.SDK_INT >= 30) {
+                        for (int band : identity.getBands()) addUnique(lteBands, "4G B" + band);
+                    }
+                    if (lteBands.isEmpty() && identity.getEarfcn() != CellInfo.UNAVAILABLE)
+                        addUnique(lteBands, "4G（EARFCN " + identity.getEarfcn() + "）");
+                    if (Build.VERSION.SDK_INT >= 28) lteBandwidthKhz = identity.getBandwidth();
+                    if (lteSignal == null) lteSignal = lte.getCellSignalStrength();
+                }
+            }
+
+            List<String> all = new ArrayList<>();
+            all.addAll(nrBands);
+            all.addAll(lteBands);
+            if (!nrBands.isEmpty()) s.mobileGeneration = "5G";
+            else if (!lteBands.isEmpty()) s.mobileGeneration = "4G";
+            CellSignalStrength primarySignal;
+            if (!nrBands.isEmpty()) {
+                s.currentBand = nrBands.get(0);
+                primarySignal = nrSignal;
+            } else if (!lteBands.isEmpty()) {
+                s.currentBand = lteBands.get(0);
+                primarySignal = lteSignal;
+            } else {
+                primarySignal = nrSignal != null ? nrSignal : lteSignal;
+                if (nrSignal != null) s.currentBand = "5G";
+                else if (lteSignal != null) s.currentBand = "4G";
+            }
+            s.bandDetails = join(all, " ＋ ");
+            if (lteBandwidthKhz > 0 && lteBandwidthKhz != CellInfo.UNAVAILABLE)
+                s.bandDetails += (s.bandDetails.isEmpty() ? "" : "｜") + "LTE 頻寬 " + (lteBandwidthKhz / 1000) + " MHz";
+            if (primarySignal != null) {
+                s.signalDbm = primarySignal.getDbm();
+                s.signalLevel = primarySignal.getLevel();
+            }
+        } catch (SecurityException ignored) {
+            s.bandDetails = "位置權限未開放，無法讀取頻段";
+        } catch (Exception ignored) {
+            s.bandDetails = "手機系統未提供頻段資料";
+        }
+    }
+
+    private static long measurePing() {
+        long started = android.os.SystemClock.elapsedRealtime();
+        try (Socket socket = new Socket()) {
+            socket.connect(new InetSocketAddress("1.1.1.1", 443), 1500);
+            return android.os.SystemClock.elapsedRealtime() - started;
+        } catch (Exception ignored) {
+            return -1;
+        }
+    }
+
+    private static void addUnique(List<String> values, String value) {
+        if (!values.contains(value)) values.add(value);
+    }
+
+    private static String join(List<String> values, String separator) {
+        StringBuilder out = new StringBuilder();
+        for (String value : values) {
+            if (out.length() > 0) out.append(separator);
+            out.append(value);
+        }
+        return out.toString();
     }
 
     private void primeNetworkCounters() {
