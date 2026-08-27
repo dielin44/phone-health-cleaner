@@ -11,6 +11,8 @@ import android.net.ConnectivityManager;
 import android.net.Network;
 import android.net.NetworkCapabilities;
 import android.net.TrafficStats;
+import android.net.wifi.WifiInfo;
+import android.net.wifi.WifiManager;
 import android.os.BatteryManager;
 import android.os.Build;
 import android.os.Environment;
@@ -131,8 +133,8 @@ final class DeviceMonitor {
 
         BatteryManager bm = (BatteryManager) context.getSystemService(Context.BATTERY_SERVICE);
         if (bm != null) {
-            s.currentUa = bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CURRENT_NOW);
-            if (s.currentUa == Integer.MIN_VALUE || Math.abs((long)s.currentUa) > 30000000L) s.currentUa = Integer.MIN_VALUE;
+            int reported = bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CURRENT_NOW);
+            s.currentUa = selectReliableCurrent(reported, s.charging, s.batteryLevel);
             if (s.currentUa != Integer.MIN_VALUE && s.voltageMv > 0)
                 s.powerW = Math.abs((double)s.currentUa * s.voltageMv / 1_000_000_000d);
         }
@@ -246,7 +248,10 @@ final class DeviceMonitor {
         Network network = cm == null ? null : cm.getActiveNetwork();
         NetworkCapabilities nc = network == null || cm == null ? null : cm.getNetworkCapabilities(network);
         if (nc != null) {
-            if (nc.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) s.networkType = "Wi‑Fi";
+            if (nc.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
+                s.networkType = "Wi‑Fi";
+                collectWifi(s, nc);
+            }
             else if (nc.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) s.networkType = "行動網路";
             else if (nc.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)) s.networkType = "乙太網路";
             else if (nc.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) s.networkType = "VPN";
@@ -267,6 +272,7 @@ final class DeviceMonitor {
     }
 
     private void collectRadio(DeviceSnapshot s) {
+        if (!"行動網路".equals(s.networkType)) return;
         if (context.checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
             s.bandDetails = "需要允許位置權限才能讀取行動網路頻段";
             return;
@@ -340,7 +346,7 @@ final class DeviceMonitor {
     private static long measurePing() {
         long started = android.os.SystemClock.elapsedRealtime();
         try (Socket socket = new Socket()) {
-            socket.connect(new InetSocketAddress("1.1.1.1", 443), 1500);
+            socket.connect(new InetSocketAddress("1.1.1.1", 443), 700);
             return android.os.SystemClock.elapsedRealtime() - started;
         } catch (Exception ignored) {
             return -1;
@@ -358,6 +364,54 @@ final class DeviceMonitor {
             out.append(value);
         }
         return out.toString();
+    }
+
+    private void collectWifi(DeviceSnapshot s, NetworkCapabilities nc) {
+        try {
+            WifiInfo info = null;
+            if (Build.VERSION.SDK_INT >= 29 && nc.getTransportInfo() instanceof WifiInfo)
+                info = (WifiInfo) nc.getTransportInfo();
+            if (info == null) {
+                WifiManager wm = (WifiManager) context.getSystemService(Context.WIFI_SERVICE);
+                if (wm != null) info = wm.getConnectionInfo();
+            }
+            if (info == null) return;
+            int frequency = info.getFrequency();
+            if (frequency >= 5925) s.currentBand = "Wi‑Fi 6 GHz";
+            else if (frequency >= 4900) s.currentBand = "Wi‑Fi 5 GHz";
+            else if (frequency >= 2400) s.currentBand = "Wi‑Fi 2.4 GHz";
+            if (frequency > 0) s.bandDetails = s.currentBand + "｜" + frequency + " MHz";
+            s.signalDbm = info.getRssi();
+            s.signalLevel = WifiManager.calculateSignalLevel(s.signalDbm, 5);
+        } catch (Exception ignored) {
+            s.bandDetails = "手機系統未提供 Wi‑Fi 頻段資料";
+        }
+    }
+
+    private static int selectReliableCurrent(int reportedUa, boolean charging, int batteryLevel) {
+        List<Long> candidates = new ArrayList<>();
+        if (reportedUa != Integer.MIN_VALUE) candidates.add((long)reportedUa);
+        File supplies = new File("/sys/class/power_supply");
+        File[] nodes = supplies.listFiles();
+        if (nodes != null) {
+            for (File node : nodes) {
+                String name = node.getName().toLowerCase(Locale.ROOT);
+                if (!(name.contains("battery") || name.contains("bms") || name.contains("usb") ||
+                        name.contains("charger") || name.contains("main"))) continue;
+                long value = readLongNode(new File(node, "current_now").getAbsolutePath(), Long.MIN_VALUE);
+                if (value != Long.MIN_VALUE) candidates.add(value);
+            }
+        }
+        long best = Long.MIN_VALUE;
+        for (long value : candidates) {
+            long magnitude = Math.abs(value);
+            if (magnitude >= 20_000 && magnitude <= 30_000_000 &&
+                    (best == Long.MIN_VALUE || magnitude > Math.abs(best))) best = value;
+        }
+        if (best == Long.MIN_VALUE) return Integer.MIN_VALUE;
+        long oriented = charging ? Math.abs(best) : -Math.abs(best);
+        if (oriented > Integer.MAX_VALUE || oriented < Integer.MIN_VALUE) return Integer.MIN_VALUE;
+        return (int)oriented;
     }
 
     private void primeNetworkCounters() {

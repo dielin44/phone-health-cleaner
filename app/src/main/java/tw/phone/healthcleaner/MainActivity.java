@@ -10,6 +10,9 @@ import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.text.SpannableString;
+import android.text.Spanned;
+import android.text.style.ForegroundColorSpan;
 import android.util.TypedValue;
 import android.view.View;
 import android.widget.Button;
@@ -57,7 +60,7 @@ public class MainActivity extends Activity {
     private TextView status;
     private TextView batteryTempValue, cpuTempValue, gpuTempValue;
     private TextView batteryTempArrow, cpuTempArrow, gpuTempArrow;
-    private TextView downloadValue, uploadValue, pingValue;
+    private TextView downloadValue, uploadValue;
     private TextView deviceDetails, cpuDetails, batteryDetails, memoryDetails, networkDetails;
     private TextView historyTitle, historySummary;
     private TrendChartView temperatureChart, batteryChart;
@@ -101,9 +104,8 @@ public class MainActivity extends Activity {
 
         root.addView(sectionTitle("網路"));
         LinearLayout network = horizontal();
-        downloadValue = metricCard(network, "下載", "— KB/s", Color.rgb(37, 99, 235), false);
-        uploadValue = metricCard(network, "上傳", "— KB/s", Color.rgb(5, 150, 105), false);
-        pingValue = metricCard(network, "Ping", "— ms", Color.rgb(124, 58, 237), false);
+        downloadValue = metricCard(network, "下載速度", "— Mbps", Color.rgb(37, 99, 235), false);
+        uploadValue = metricCard(network, "上傳速度", "— Mbps", Color.rgb(5, 150, 105), false);
         root.addView(network);
         networkDetails = detailText("連線資訊尚未檢測");
         root.addView(card(networkDetails));
@@ -202,7 +204,7 @@ public class MainActivity extends Activity {
         status.setText("即時監測中｜每秒更新數值、每 10 秒記錄趨勢");
 
         liveExecutor = Executors.newSingleThreadScheduledExecutor();
-        liveExecutor.scheduleWithFixedDelay(() -> {
+        liveExecutor.scheduleAtFixedRate(() -> {
             DeviceSnapshot snapshot = deviceMonitor.collect();
             boolean record = snapshot.timestamp - lastHistoryPointAt >= 10_000;
             if (record) {
@@ -244,20 +246,30 @@ public class MainActivity extends Activity {
         gpuTempValue.setText(temp(s.gpuTemp));
         downloadValue.setText(rate(s.downloadBps));
         uploadValue.setText(rate(s.uploadBps));
-        pingValue.setText(ping(s.pingMs));
 
         if (monitoring) updateBandUsage(s);
         String connection = s.networkType + (s.mobileGeneration.isEmpty() ? "" : " " + s.mobileGeneration);
-        String band = s.currentBand.isEmpty() ? "系統未提供" : s.currentBand;
+        boolean offline = "未連線".equals(s.networkType) || !s.internetValidated;
+        String band = offline ? "無網路" : (s.currentBand.isEmpty() ? "系統未提供" : s.currentBand);
         String tower = s.bandDetails.isEmpty() ? "手機系統未提供" : s.bandDetails;
         String signal = s.signalDbm == Integer.MIN_VALUE ? "系統未提供" :
                 s.signalDbm + " dBm｜" + signalQuality(s.signalLevel);
         String usage = monitoring || totalBandUsageMs > 0 ? bandUsageText() : "開始即時監測後統計";
-        networkDetails.setText("連線：" + connection + (s.internetValidated ? "｜網際網路正常" : "｜尚未驗證") +
-                "\n目前頻段：" + band + "｜訊號：" + signal +
-                "\n基地台頻段：" + tower +
+        String networkText = "連線：" + connection + (s.internetValidated ? "｜網際網路正常" : "｜無法連上網際網路") +
+                "\n目前頻段：" + band + (offline ? "" : "｜訊號：" + signal) +
+                "\n頻段資訊：" + tower +
                 "\n即時 Ping：" + ping(s.pingMs) +
-                "\n本次頻段使用占比：" + usage);
+                "\n本次頻段使用占比：" + usage;
+        SpannableString coloredNetwork = new SpannableString(networkText);
+        int bandStart = networkText.indexOf(band);
+        int bandEnd = networkText.indexOf('\n', bandStart);
+        if (bandEnd < 0) bandEnd = networkText.length();
+        int bandColor = offline ? Color.rgb(220, 38, 38) : s.signalLevel < 0 ? Color.rgb(100, 116, 139) :
+                s.signalLevel <= 1 ? Color.rgb(220, 38, 38) :
+                s.signalLevel == 2 ? Color.rgb(217, 119, 6) : Color.rgb(37, 99, 235);
+        if (bandStart >= 0) coloredNetwork.setSpan(new ForegroundColorSpan(bandColor), bandStart, bandEnd,
+                Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        networkDetails.setText(coloredNetwork);
 
         StringBuilder core = new StringBuilder();
         core.append("CPU 總使用率：").append(percent(s.cpuUsage)).append("｜總核心：").append(s.coreCount).append(" 核");
@@ -281,7 +293,7 @@ public class MainActivity extends Activity {
         battery.append("\n目前最大容量：").append(numberOrUnavailable(s.fullCapacityMah, " mAh"))
                 .append("\n電池溫度：").append(temp(s.batteryTemp))
                 .append("｜電壓：").append(s.voltageMv > 0 ? String.format(Locale.TAIWAN, "%.3f V", s.voltageMv / 1000f) : "系統未提供")
-                .append("\n電流：").append(s.currentUa == Integer.MIN_VALUE ? "系統未提供" : String.format(Locale.TAIWAN, "%,.0f mA", s.currentUa / 1000f))
+                .append("\n即時電流：").append(s.currentUa == Integer.MIN_VALUE ? "系統未提供可靠值" : String.format(Locale.TAIWAN, "%+,.0f mA", s.currentUa / 1000f))
                 .append("｜功率：").append(Double.isNaN(s.powerW) ? "系統未提供" : String.format(Locale.TAIWAN, "%.2f W", s.powerW))
                 .append("\n電池技術：").append(s.batteryTechnology);
         batteryDetails.setText(battery.toString());
@@ -548,9 +560,11 @@ public class MainActivity extends Activity {
 
     private static String rate(long bps) {
         if (bps < 0) return "等待數據";
-        if (bps < 1024) return bps + " B/s";
-        if (bps < 1024 * 1024) return String.format(Locale.TAIWAN, "%.1f KB/s", bps / 1024f);
-        return String.format(Locale.TAIWAN, "%.2f MB/s", bps / 1024f / 1024f);
+        double mbps = bps * 8d / 1_000_000d;
+        if (mbps >= 1000d) return String.format(Locale.TAIWAN, "%.2f Gbps", mbps / 1000d);
+        if (mbps >= 100d) return String.format(Locale.TAIWAN, "%.0f Mbps", mbps);
+        if (mbps >= 10d) return String.format(Locale.TAIWAN, "%.1f Mbps", mbps);
+        return String.format(Locale.TAIWAN, "%.2f Mbps", mbps);
     }
 
     private static String ping(long ms) { return ms < 0 ? "逾時" : ms + " ms"; }
