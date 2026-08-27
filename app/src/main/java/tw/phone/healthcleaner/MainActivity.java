@@ -10,6 +10,7 @@ import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.util.TypedValue;
 import android.view.View;
 import android.widget.Button;
 import android.widget.FrameLayout;
@@ -441,6 +442,8 @@ public class MainActivity extends Activity {
         TextView name = text(label, 13, Color.rgb(100, 116, 139), true);
         TextView value = text(initial, 23, color, true);
         value.setGravity(android.view.Gravity.CENTER);
+        value.setSingleLine(true);
+        value.setAutoSizeTextTypeUniformWithConfiguration(14, 23, 1, TypedValue.COMPLEX_UNIT_SP);
         box.addView(name);
         box.addView(value);
         frame.addView(box, new FrameLayout.LayoutParams(-1, -1));
